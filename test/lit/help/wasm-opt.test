@@ -76,6 +76,9 @@
 ;; CHECK-NEXT:   --output-source-map-url,-osu                  Emit specified string as source
 ;; CHECK-NEXT:                                                 map URL
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --new-wat-parser                              Use the experimental new WAT
+;; CHECK-NEXT:                                                 parser
+;; CHECK-NEXT:
 ;; CHECK-NEXT:
 ;; CHECK-NEXT: Optimization passes:
 ;; CHECK-NEXT: --------------------
@@ -166,7 +169,18 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --global-refining                             refine the types of globals
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --gsi                                         globally optimize struct values
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --gto                                         globally optimize GC types
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --gufa                                        Grand Unified Flow Analysis:
+;; CHECK-NEXT:                                                 optimize the entire program
+;; CHECK-NEXT:                                                 using information about what
+;; CHECK-NEXT:                                                 content can actually appear in
+;; CHECK-NEXT:                                                 each location
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --gufa-optimizing                             GUFA plus local optimizations in
+;; CHECK-NEXT:                                                 functions we modified
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --heap2local                                  replace GC allocations with
 ;; CHECK-NEXT:                                                 locals
@@ -381,6 +395,9 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --souperify-single-use                        emit Souper IR in text form
 ;; CHECK-NEXT:                                                 (single-use nodes only)
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --spill-pointers                              spill pointers to the C stack
+;; CHECK-NEXT:                                                 (useful for Boehm-style GC)
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --ssa                                         ssa-ify variables so that they
 ;; CHECK-NEXT:                                                 have a single assignment
@@ -601,6 +618,10 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --disable-extended-const                      Disable extended const
 ;; CHECK-NEXT:                                                 expressions
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --enable-strings                              Enable strings
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --disable-strings                             Disable strings
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --no-validation,-n                            Disables validation, assumes
 ;; CHECK-NEXT:                                                 inputs are correct

@@ -472,6 +472,8 @@ private:
   Function* func;
 };
 
+std::ostream& printStackIR(std::ostream& o, Module* module, bool optimize);
+
 } // namespace wasm
 
 #endif // wasm_stack_h

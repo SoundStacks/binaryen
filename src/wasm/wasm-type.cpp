@@ -60,7 +60,6 @@ struct TypeInfo {
   enum Kind {
     TupleKind,
     RefKind,
-    RttKind,
   } kind;
   struct Ref {
     HeapType heapType;
@@ -69,20 +68,17 @@ struct TypeInfo {
   union {
     Tuple tuple;
     Ref ref;
-    Rtt rtt;
   };
 
   TypeInfo(const Tuple& tuple) : kind(TupleKind), tuple(tuple) {}
   TypeInfo(Tuple&& tuple) : kind(TupleKind), tuple(std::move(tuple)) {}
   TypeInfo(HeapType heapType, Nullability nullable)
     : kind(RefKind), ref{heapType, nullable} {}
-  TypeInfo(Rtt rtt) : kind(RttKind), rtt(rtt) {}
   TypeInfo(const TypeInfo& other);
   ~TypeInfo();
 
   constexpr bool isTuple() const { return kind == TupleKind; }
   constexpr bool isRef() const { return kind == RefKind; }
-  constexpr bool isRtt() const { return kind == RttKind; }
 
   bool isNullable() const { return kind == RefKind && ref.nullable; }
 
@@ -165,7 +161,6 @@ struct SubTyper {
   bool isSubType(const Signature& a, const Signature& b);
   bool isSubType(const Struct& a, const Struct& b);
   bool isSubType(const Array& a, const Array& b);
-  bool isSubType(const Rtt& a, const Rtt& b);
 };
 
 // Helper for finding the equirecursive least upper bound of two types.
@@ -187,14 +182,11 @@ private:
   // used directly.
   std::optional<Type> lub(Type a, Type b);
   HeapType lub(HeapType a, HeapType b);
-  HeapType::BasicHeapType lub(HeapType::BasicHeapType a,
-                              HeapType::BasicHeapType b);
   std::optional<Tuple> lub(const Tuple& a, const Tuple& b);
   std::optional<Field> lub(const Field& a, const Field& b);
   std::optional<Signature> lub(const Signature& a, const Signature& b);
   Struct lub(const Struct& a, const Struct& b);
   std::optional<Array> lub(const Array& a, const Array& b);
-  std::optional<Rtt> lub(const Rtt& a, const Rtt& b);
 };
 
 // Helper for printing types.
@@ -233,7 +225,6 @@ struct TypePrinter {
                       std::optional<HeapType> super = std::nullopt);
   std::ostream& print(const Array& array,
                       std::optional<HeapType> super = std::nullopt);
-  std::ostream& print(const Rtt& rtt);
 };
 
 // Helper for hashing the shapes of TypeInfos and HeapTypeInfos. Keeps track of
@@ -257,7 +248,6 @@ struct FiniteShapeHasher {
   size_t hash(const Signature& sig);
   size_t hash(const Struct& struct_);
   size_t hash(const Array& array);
-  size_t hash(const Rtt& rtt);
 };
 
 // Helper for comparing the shapes of TypeInfos and HeapTypeInfos for equality.
@@ -283,7 +273,6 @@ struct FiniteShapeEquator {
   bool eq(const Signature& a, const Signature& b);
   bool eq(const Struct& a, const Struct& b);
   bool eq(const Array& a, const Array& b);
-  bool eq(const Rtt& a, const Rtt& b);
 };
 
 struct RecGroupHasher {
@@ -309,7 +298,6 @@ struct RecGroupHasher {
   size_t hash(const Signature& sig) const;
   size_t hash(const Struct& struct_) const;
   size_t hash(const Array& array) const;
-  size_t hash(const Rtt& rtt) const;
 };
 
 struct RecGroupEquator {
@@ -336,7 +324,6 @@ struct RecGroupEquator {
   bool eq(const Signature& a, const Signature& b) const;
   bool eq(const Struct& a, const Struct& b) const;
   bool eq(const Array& a, const Array& b) const;
-  bool eq(const Rtt& a, const Rtt& b) const;
 };
 
 // A wrapper around a RecGroup that provides equality and hashing based on the
@@ -569,17 +556,54 @@ Type asCanonical(Type type) {
   }
 }
 
-// Given a HeapType that may or may not be backed by the simplest possible
-// representation, return the equivalent type that is definitely backed by the
-// simplest possible representation.
-HeapType asCanonical(HeapType type) {
+HeapType::BasicHeapType getBasicHeapSupertype(HeapType type) {
   if (type.isBasic()) {
-    return type;
-  } else if (auto canon = getHeapTypeInfo(type)->getCanonical()) {
-    return *canon;
-  } else {
-    return type;
+    return type.getBasic();
   }
+  auto* info = getHeapTypeInfo(type);
+  switch (info->kind) {
+    case HeapTypeInfo::BasicKind:
+      break;
+    case HeapTypeInfo::SignatureKind:
+      return HeapType::func;
+    case HeapTypeInfo::StructKind:
+    case HeapTypeInfo::ArrayKind:
+      return HeapType::data;
+  }
+  WASM_UNREACHABLE("unexpected kind");
+};
+
+HeapType getBasicHeapTypeLUB(HeapType::BasicHeapType a,
+                             HeapType::BasicHeapType b) {
+  if (a == b) {
+    return a;
+  }
+  // Canonicalize to have `a` be the lesser type.
+  if (unsigned(a) > unsigned(b)) {
+    std::swap(a, b);
+  }
+  switch (a) {
+    case HeapType::func:
+    case HeapType::any:
+      return HeapType::any;
+    case HeapType::eq:
+      if (b == HeapType::i31 || b == HeapType::data) {
+        return HeapType::eq;
+      }
+      return HeapType::any;
+    case HeapType::i31:
+      if (b == HeapType::data) {
+        return HeapType::eq;
+      }
+      return HeapType::any;
+    case HeapType::data:
+    case HeapType::string:
+    case HeapType::stringview_wtf8:
+    case HeapType::stringview_wtf16:
+    case HeapType::stringview_iter:
+      return HeapType::any;
+  }
+  WASM_UNREACHABLE("unexpected basic type");
 }
 
 TypeInfo::TypeInfo(const TypeInfo& other) {
@@ -590,9 +614,6 @@ TypeInfo::TypeInfo(const TypeInfo& other) {
       return;
     case RefKind:
       new (&ref) auto(other.ref);
-      return;
-    case RttKind:
-      new (&rtt) auto(other.rtt);
       return;
   }
   WASM_UNREACHABLE("unexpected kind");
@@ -606,9 +627,6 @@ TypeInfo::~TypeInfo() {
     case RefKind:
       ref.~Ref();
       return;
-    case RttKind:
-      rtt.~Rtt();
-      return;
   }
   WASM_UNREACHABLE("unexpected kind");
 }
@@ -620,31 +638,6 @@ std::optional<Type> TypeInfo::getCanonical() const {
     }
     if (tuple.types.size() == 1) {
       return tuple.types[0];
-    }
-  }
-  if (isRef()) {
-    HeapType basic = asCanonical(ref.heapType);
-    if (basic.isBasic()) {
-      if (ref.nullable) {
-        switch (basic.getBasic()) {
-          case HeapType::func:
-            return Type::funcref;
-          case HeapType::any:
-            return Type::anyref;
-          case HeapType::eq:
-            return Type::eqref;
-          case HeapType::i31:
-          case HeapType::data:
-            break;
-        }
-      } else {
-        if (basic == HeapType::i31) {
-          return Type::i31ref;
-        }
-        if (basic == HeapType::data) {
-          return Type::dataref;
-        }
-      }
     }
   }
   return {};
@@ -660,8 +653,6 @@ bool TypeInfo::operator==(const TypeInfo& other) const {
     case RefKind:
       return ref.nullable == other.ref.nullable &&
              ref.heapType == other.ref.heapType;
-    case RttKind:
-      return rtt == other.rtt;
   }
   WASM_UNREACHABLE("unexpected kind");
 }
@@ -937,11 +928,6 @@ Type::Type(HeapType heapType, Nullability nullable) {
   new (this) Type(globalTypeStore.insert(TypeInfo(heapType, nullable)));
 }
 
-Type::Type(Rtt rtt) {
-  assert(!isTemp(rtt.heapType) && "Leaking temporary type!");
-  new (this) Type(globalTypeStore.insert(rtt));
-}
-
 bool Type::isTuple() const {
   if (isBasic()) {
     return false;
@@ -952,7 +938,7 @@ bool Type::isTuple() const {
 
 bool Type::isRef() const {
   if (isBasic()) {
-    return id >= funcref && id <= _last_basic_type;
+    return false;
   } else {
     return getTypeInfo(*this)->isRef();
   }
@@ -960,7 +946,7 @@ bool Type::isRef() const {
 
 bool Type::isFunction() const {
   if (isBasic()) {
-    return id == funcref;
+    return false;
   } else {
     auto* info = getTypeInfo(*this);
     return info->isRef() && info->ref.heapType.isFunction();
@@ -969,7 +955,7 @@ bool Type::isFunction() const {
 
 bool Type::isData() const {
   if (isBasic()) {
-    return id == dataref;
+    return false;
   } else {
     auto* info = getTypeInfo(*this);
     return info->isRef() && info->ref.heapType.isData();
@@ -978,7 +964,7 @@ bool Type::isData() const {
 
 bool Type::isNullable() const {
   if (isBasic()) {
-    return id >= funcref && id <= eqref; // except i31ref and dataref
+    return false;
   } else {
     return getTypeInfo(*this)->isNullable();
   }
@@ -989,14 +975,6 @@ bool Type::isNonNullable() const {
     return !isNullable();
   } else {
     return false;
-  }
-}
-
-bool Type::isRtt() const {
-  if (isBasic()) {
-    return false;
-  } else {
-    return getTypeInfo(*this)->isRtt();
   }
 }
 
@@ -1016,19 +994,7 @@ bool Type::isDefaultable() const {
     }
     return true;
   }
-  return isConcrete() && !isNonNullable() && !isRtt();
-}
-
-bool Type::isDefaultableOrNonNullable() const {
-  if (isTuple()) {
-    for (auto t : *this) {
-      if (!t.isDefaultableOrNonNullable()) {
-        return false;
-      }
-    }
-    return true;
-  }
-  return isConcrete() && !isRtt();
+  return isConcrete() && !isNonNullable();
 }
 
 Nullability Type::getNullability() const {
@@ -1047,11 +1013,6 @@ unsigned Type::getByteSize() const {
         return 8;
       case Type::v128:
         return 16;
-      case Type::funcref:
-      case Type::anyref:
-      case Type::eqref:
-      case Type::i31ref:
-      case Type::dataref:
       case Type::none:
       case Type::unreachable:
         break;
@@ -1113,6 +1074,11 @@ FeatureSet Type::getFeatures() const {
           case HeapType::BasicHeapType::i31:
           case HeapType::BasicHeapType::data:
             return FeatureSet::ReferenceTypes | FeatureSet::GC;
+          case HeapType::string:
+          case HeapType::stringview_wtf8:
+          case HeapType::stringview_wtf16:
+          case HeapType::stringview_iter:
+            return FeatureSet::ReferenceTypes | FeatureSet::Strings;
           default: {}
         }
       }
@@ -1122,8 +1088,6 @@ FeatureSet Type::getFeatures() const {
       // load of the wasm we don't know the features yet, so we apply the more
       // refined types), so we don't add that in any case here.
       return FeatureSet::ReferenceTypes;
-    } else if (t.isRtt()) {
-      return FeatureSet::ReferenceTypes | FeatureSet::GC;
     }
     TODO_SINGLE_COMPOUND(t);
     switch (t.getBasic()) {
@@ -1160,16 +1124,6 @@ HeapType Type::getHeapType() const {
       case Type::f64:
       case Type::v128:
         break;
-      case Type::funcref:
-        return HeapType::func;
-      case Type::anyref:
-        return HeapType::any;
-      case Type::eqref:
-        return HeapType::eq;
-      case Type::i31ref:
-        return HeapType::i31;
-      case Type::dataref:
-        return HeapType::data;
     }
     WASM_UNREACHABLE("Unexpected type");
   } else {
@@ -1179,16 +1133,9 @@ HeapType Type::getHeapType() const {
         break;
       case TypeInfo::RefKind:
         return info->ref.heapType;
-      case TypeInfo::RttKind:
-        return info->rtt.heapType;
     }
     WASM_UNREACHABLE("Unexpected type");
   }
-}
-
-Rtt Type::getRtt() const {
-  assert(isRtt());
-  return getTypeInfo(*this)->rtt;
 }
 
 Type Type::get(unsigned byteSize, bool float_) {
@@ -1222,11 +1169,50 @@ std::vector<HeapType> Type::getHeapTypeChildren() {
 }
 
 bool Type::hasLeastUpperBound(Type a, Type b) {
-  return TypeBounder().hasLeastUpperBound(a, b);
+  if (getTypeSystem() == TypeSystem::Equirecursive) {
+    return TypeBounder().hasLeastUpperBound(a, b);
+  }
+  return getLeastUpperBound(a, b) != Type::none;
 }
 
 Type Type::getLeastUpperBound(Type a, Type b) {
-  return TypeBounder().getLeastUpperBound(a, b);
+  if (a == b) {
+    return a;
+  }
+  if (getTypeSystem() == TypeSystem::Equirecursive) {
+    return TypeBounder().getLeastUpperBound(a, b);
+  }
+  if (a == Type::unreachable) {
+    return b;
+  }
+  if (b == Type::unreachable) {
+    return a;
+  }
+  if (a.isTuple() && b.isTuple()) {
+    auto size = a.size();
+    if (size != b.size()) {
+      return Type::none;
+    }
+    std::vector<Type> elems;
+    elems.reserve(size);
+    for (size_t i = 0; i < size; ++i) {
+      auto lub = Type::getLeastUpperBound(a[i], b[i]);
+      if (lub == Type::none) {
+        return Type::none;
+      }
+      elems.push_back(lub);
+    }
+    return Type(elems);
+  }
+  if (a.isRef() && b.isRef()) {
+    auto nullability =
+      (a.isNullable() || b.isNullable()) ? Nullable : NonNullable;
+    auto heapType =
+      HeapType::getLeastUpperBound(a.getHeapType(), b.getHeapType());
+    return Type(heapType, nullability);
+  }
+  return Type::none;
+  WASM_UNREACHABLE("unexpected type");
 }
 
 size_t Type::size() const {
@@ -1426,7 +1412,53 @@ std::vector<HeapType> HeapType::getReferencedHeapTypes() const {
 }
 
 HeapType HeapType::getLeastUpperBound(HeapType a, HeapType b) {
-  return TypeBounder().getLeastUpperBound(a, b);
+  if (a == b) {
+    return a;
+  }
+  if (getTypeSystem() == TypeSystem::Equirecursive) {
+    return TypeBounder().getLeastUpperBound(a, b);
+  }
+  if (a.isBasic() || b.isBasic()) {
+    return getBasicHeapTypeLUB(getBasicHeapSupertype(a),
+                               getBasicHeapSupertype(b));
+  }
+
+  auto* infoA = getHeapTypeInfo(a);
+  auto* infoB = getHeapTypeInfo(b);
+
+  if (infoA->kind != infoB->kind) {
+    return getBasicHeapTypeLUB(getBasicHeapSupertype(a),
+                               getBasicHeapSupertype(b));
+  }
+
+  // Walk up the subtype tree to find the LUB. Ascend the tree from both `a`
+  // and `b` in lockstep. The first type we see for a second time must be the
+  // LUB because there are no cycles and the only way to encounter a type
+  // twice is for it to be on the path above both `a` and `b`.
+  std::unordered_set<HeapTypeInfo*> seen;
+  seen.insert(infoA);
+  seen.insert(infoB);
+  while (true) {
+    auto* nextA = infoA->supertype;
+    auto* nextB = infoB->supertype;
+    if (nextA == nullptr && nextB == nullptr) {
+      // Did not find a LUB in the subtype tree.
+      return getBasicHeapTypeLUB(getBasicHeapSupertype(a),
+                                 getBasicHeapSupertype(b));
+    }
+    if (nextA) {
+      if (!seen.insert(nextA).second) {
+        return HeapType(uintptr_t(nextA));
+      }
+      infoA = nextA;
+    }
+    if (nextB) {
+      if (!seen.insert(nextB).second) {
+        return HeapType(uintptr_t(nextB));
+      }
+      infoB = nextB;
+    }
+  }
 }
 
 // Recursion groups with single elements are encoded as that single element's
@@ -1499,7 +1531,6 @@ std::string Tuple::toString() const { return genericToString(*this); }
 std::string Signature::toString() const { return genericToString(*this); }
 std::string Struct::toString() const { return genericToString(*this); }
 std::string Array::toString() const { return genericToString(*this); }
-std::string Rtt::toString() const { return genericToString(*this); }
 
 std::ostream& operator<<(std::ostream& os, Type type) {
   return TypePrinter(os).print(type);
@@ -1527,9 +1558,6 @@ std::ostream& operator<<(std::ostream& os, Struct struct_) {
 }
 std::ostream& operator<<(std::ostream& os, Array array) {
   return TypePrinter(os).print(array);
-}
-std::ostream& operator<<(std::ostream& os, Rtt rtt) {
-  return TypePrinter(os).print(rtt);
 }
 std::ostream& operator<<(std::ostream& os, TypeBuilder::ErrorReason reason) {
   switch (reason) {
@@ -1576,9 +1604,6 @@ bool SubTyper::isSubType(Type a, Type b) {
   if (a.isTuple() && b.isTuple()) {
     return isSubType(a.getTuple(), b.getTuple());
   }
-  if (a.isRtt() && b.isRtt()) {
-    return isSubType(a.getRtt(), b.getRtt());
-  }
   return false;
 }
 
@@ -1601,6 +1626,11 @@ bool SubTyper::isSubType(HeapType a, HeapType b) {
         return false;
       case HeapType::data:
         return a.isData();
+      case HeapType::string:
+      case HeapType::stringview_wtf8:
+      case HeapType::stringview_wtf16:
+      case HeapType::stringview_iter:
+        return false;
     }
   }
   if (a.isBasic()) {
@@ -1684,13 +1714,6 @@ bool SubTyper::isSubType(const Array& a, const Array& b) {
   return isSubType(a.element, b.element);
 }
 
-bool SubTyper::isSubType(const Rtt& a, const Rtt& b) {
-  // (rtt n $x) is a subtype of (rtt $x), that is, if the only difference in
-  // information is that the left side specifies a depth while the right side
-  // allows any depth.
-  return a.heapType == b.heapType && a.hasDepth() && !b.hasDepth();
-}
-
 bool TypeBounder::hasLeastUpperBound(Type a, Type b) { return bool(lub(a, b)); }
 
 Type TypeBounder::getLeastUpperBound(Type a, Type b) {
@@ -1748,12 +1771,6 @@ std::optional<Type> TypeBounder::lub(Type a, Type b) {
       (a.isNullable() || b.isNullable()) ? Nullable : NonNullable;
     HeapType heapType = lub(a.getHeapType(), b.getHeapType());
     return builder.getTempRefType(heapType, nullability);
-  } else if (a.isRtt() && b.isRtt()) {
-    auto rtt = lub(a.getRtt(), b.getRtt());
-    if (!rtt) {
-      return {};
-    }
-    return builder.getTempRttType(*rtt);
   }
   return {};
 }
@@ -1763,70 +1780,20 @@ HeapType TypeBounder::lub(HeapType a, HeapType b) {
     return a;
   }
 
-  auto getBasicApproximation = [](HeapType x) {
-    if (x.isBasic()) {
-      return x.getBasic();
-    }
-    auto* info = getHeapTypeInfo(x);
-    switch (info->kind) {
-      case HeapTypeInfo::BasicKind:
-        break;
-      case HeapTypeInfo::SignatureKind:
-        return HeapType::func;
-      case HeapTypeInfo::StructKind:
-      case HeapTypeInfo::ArrayKind:
-        return HeapType::data;
-    }
-    WASM_UNREACHABLE("unexpected kind");
-  };
-
-  auto getBasicLUB = [&]() {
-    return lub(getBasicApproximation(a), getBasicApproximation(b));
-  };
-
   if (a.isBasic() || b.isBasic()) {
-    return getBasicLUB();
+    return getBasicHeapTypeLUB(getBasicHeapSupertype(a),
+                               getBasicHeapSupertype(b));
   }
 
   HeapTypeInfo* infoA = getHeapTypeInfo(a);
   HeapTypeInfo* infoB = getHeapTypeInfo(b);
 
   if (infoA->kind != infoB->kind) {
-    return getBasicLUB();
+    return getBasicHeapTypeLUB(getBasicHeapSupertype(a),
+                               getBasicHeapSupertype(b));
   }
 
-  if (typeSystem == TypeSystem::Nominal ||
-      typeSystem == TypeSystem::Isorecursive) {
-    // Walk up the subtype tree to find the LUB. Ascend the tree from both `a`
-    // and `b` in lockstep. The first type we see for a second time must be the
-    // LUB because there are no cycles and the only way to encounter a type
-    // twice is for it to be on the path above both `a` and `b`.
-    std::unordered_set<HeapTypeInfo*> seen;
-    auto* currA = infoA;
-    auto* currB = infoB;
-    seen.insert(currA);
-    seen.insert(currB);
-    while (true) {
-      auto* nextA = currA->supertype;
-      auto* nextB = currB->supertype;
-      if (nextA == nullptr && nextB == nullptr) {
-        // Did not find a LUB in the subtype tree.
-        return getBasicLUB();
-      }
-      if (nextA) {
-        if (!seen.insert(nextA).second) {
-          return HeapType(uintptr_t(nextA));
-        }
-        currA = nextA;
-      }
-      if (nextB) {
-        if (!seen.insert(nextB).second) {
-          return HeapType(uintptr_t(nextB));
-        }
-        currB = nextB;
-      }
-    }
-  }
+  assert(getTypeSystem() == TypeSystem::Equirecursive);
 
   // Allocate a new slot to construct the LUB of this pair if we have not
   // already seen it before. Canonicalize the pair to have the element with the
@@ -1863,35 +1830,6 @@ HeapType TypeBounder::lub(HeapType a, HeapType b) {
     }
   }
   WASM_UNREACHABLE("unexpected kind");
-}
-
-HeapType::BasicHeapType TypeBounder::lub(HeapType::BasicHeapType a,
-                                         HeapType::BasicHeapType b) {
-  if (a == b) {
-    return a;
-  }
-  // Canonicalize to have `x` be the lesser type.
-  if (unsigned(a) > unsigned(b)) {
-    std::swap(a, b);
-  }
-  switch (a) {
-    case HeapType::func:
-    case HeapType::any:
-      return HeapType::any;
-    case HeapType::eq:
-      if (b == HeapType::i31 || b == HeapType::data) {
-        return HeapType::eq;
-      }
-      return HeapType::any;
-    case HeapType::i31:
-      if (b == HeapType::data) {
-        return HeapType::eq;
-      }
-      return HeapType::any;
-    case HeapType::data:
-      return HeapType::any;
-  }
-  WASM_UNREACHABLE("unexpected basic type");
 }
 
 std::optional<Tuple> TypeBounder::lub(const Tuple& a, const Tuple& b) {
@@ -1967,14 +1905,6 @@ std::optional<Array> TypeBounder::lub(const Array& a, const Array& b) {
   }
 }
 
-std::optional<Rtt> TypeBounder::lub(const Rtt& a, const Rtt& b) {
-  if (a.heapType != b.heapType) {
-    return {};
-  }
-  uint32_t depth = (a.depth == b.depth) ? a.depth : Rtt::NoDepth;
-  return Rtt(depth, a.heapType);
-}
-
 void TypePrinter::printHeapTypeName(HeapType type) {
   if (type.isBasic()) {
     print(type);
@@ -2009,16 +1939,6 @@ std::ostream& TypePrinter::print(Type type) {
         return os << "f64";
       case Type::v128:
         return os << "v128";
-      case Type::funcref:
-        return os << "funcref";
-      case Type::anyref:
-        return os << "anyref";
-      case Type::eqref:
-        return os << "eqref";
-      case Type::i31ref:
-        return os << "i31ref";
-      case Type::dataref:
-        return os << "dataref";
     }
   }
 
@@ -2031,14 +1951,45 @@ std::ostream& TypePrinter::print(Type type) {
   if (type.isTuple()) {
     print(type.getTuple());
   } else if (type.isRef()) {
+    auto heapType = type.getHeapType();
+    if (heapType.isBasic()) {
+      // Print shorthands for certain basic heap types.
+      if (type.isNullable()) {
+        switch (heapType.getBasic()) {
+          case HeapType::func:
+            return os << "funcref";
+          case HeapType::any:
+            return os << "anyref";
+          case HeapType::eq:
+            return os << "eqref";
+          case HeapType::string:
+            return os << "stringref";
+          case HeapType::stringview_wtf8:
+            return os << "stringview_wtf8";
+          case HeapType::stringview_wtf16:
+            return os << "stringview_wtf16";
+          case HeapType::stringview_iter:
+            return os << "stringview_iter";
+          default:
+            break;
+        }
+      } else {
+        switch (heapType.getBasic()) {
+          case HeapType::i31:
+            return os << "i31ref";
+          case HeapType::data:
+            return os << "dataref";
+          default:
+            break;
+        }
+      }
+    }
     os << "(ref ";
     if (type.isNullable()) {
       os << "null ";
     }
-    printHeapTypeName(type.getHeapType());
+    printHeapTypeName(heapType);
     os << ')';
-  } else if (type.isRtt()) {
-    print(type.getRtt());
   } else {
     WASM_UNREACHABLE("unexpected type");
   }
@@ -2058,6 +2009,14 @@ std::ostream& TypePrinter::print(HeapType type) {
         return os << "i31";
       case HeapType::data:
         return os << "data";
+      case HeapType::string:
+        return os << "string";
+      case HeapType::stringview_wtf8:
+        return os << "stringview_wtf8";
+      case HeapType::stringview_wtf16:
+        return os << "stringview_wtf16";
+      case HeapType::stringview_iter:
+        return os << "stringview_iter";
     }
   }
 
@@ -2183,15 +2142,6 @@ std::ostream& TypePrinter::print(const Array& array,
   return os << ')';
 }
 
-std::ostream& TypePrinter::print(const Rtt& rtt) {
-  os << "(rtt ";
-  if (rtt.hasDepth()) {
-    os << rtt.depth << ' ';
-  }
-  printHeapTypeName(rtt.heapType);
-  return os << ')';
-}
-
 size_t FiniteShapeHasher::hash(Type type) {
   size_t digest = wasm::hash(type.isBasic());
   if (type.isBasic()) {
@@ -2233,9 +2183,6 @@ size_t FiniteShapeHasher::hash(const TypeInfo& info) {
     case TypeInfo::RefKind:
       rehash(digest, info.ref.nullable);
       hash_combine(digest, hash(info.ref.heapType));
-      return digest;
-    case TypeInfo::RttKind:
-      hash_combine(digest, hash(info.rtt));
       return digest;
   }
   WASM_UNREACHABLE("unexpected kind");
@@ -2304,12 +2251,6 @@ size_t FiniteShapeHasher::hash(const Array& array) {
   return hash(array.element);
 }
 
-size_t FiniteShapeHasher::hash(const Rtt& rtt) {
-  size_t digest = wasm::hash(rtt.depth);
-  hash_combine(digest, hash(rtt.heapType));
-  return digest;
-}
-
 bool FiniteShapeEquator::eq(Type a, Type b) {
   if (a.isBasic() != b.isBasic()) {
     return false;
@@ -2353,8 +2294,6 @@ bool FiniteShapeEquator::eq(const TypeInfo& a, const TypeInfo& b) {
     case TypeInfo::RefKind:
       return a.ref.nullable == b.ref.nullable &&
              eq(a.ref.heapType, b.ref.heapType);
-    case TypeInfo::RttKind:
-      return eq(a.rtt, b.rtt);
   }
   WASM_UNREACHABLE("unexpected kind");
 }
@@ -2415,10 +2354,6 @@ bool FiniteShapeEquator::eq(const Array& a, const Array& b) {
   return eq(a.element, b.element);
 }
 
-bool FiniteShapeEquator::eq(const Rtt& a, const Rtt& b) {
-  return a.depth == b.depth && eq(a.heapType, b.heapType);
-}
-
 size_t RecGroupHasher::operator()() const {
   size_t digest = wasm::hash(group.size());
   for (auto type : group) {
@@ -2474,9 +2409,6 @@ size_t RecGroupHasher::hash(const TypeInfo& info) const {
     case TypeInfo::RefKind:
       rehash(digest, info.ref.nullable);
       hash_combine(digest, hash(info.ref.heapType));
-      return digest;
-    case TypeInfo::RttKind:
-      hash_combine(digest, hash(info.rtt));
       return digest;
   }
   WASM_UNREACHABLE("unexpected kind");
@@ -2536,12 +2468,6 @@ size_t RecGroupHasher::hash(const Struct& struct_) const {
 
 size_t RecGroupHasher::hash(const Array& array) const {
   return hash(array.element);
-}
-
-size_t RecGroupHasher::hash(const Rtt& rtt) const {
-  size_t digest = wasm::hash(rtt.depth);
-  hash_combine(digest, hash(rtt.heapType));
-  return digest;
 }
 
 bool RecGroupEquator::operator()() const {
@@ -2604,8 +2530,6 @@ bool RecGroupEquator::eq(const TypeInfo& a, const TypeInfo& b) const {
     case TypeInfo::RefKind:
       return a.ref.nullable == b.ref.nullable &&
              eq(a.ref.heapType, b.ref.heapType);
-    case TypeInfo::RttKind:
-      return eq(a.rtt, b.rtt);
   }
   WASM_UNREACHABLE("unexpected kind");
 }
@@ -2664,10 +2588,6 @@ bool RecGroupEquator::eq(const Struct& a, const Struct& b) const {
 
 bool RecGroupEquator::eq(const Array& a, const Array& b) const {
   return eq(a.element, b.element);
-}
-
-bool RecGroupEquator::eq(const Rtt& a, const Rtt& b) const {
-  return a.depth == b.depth && eq(a.heapType, b.heapType);
 }
 
 template<typename Self> void TypeGraphWalkerBase<Self>::walkRoot(Type* type) {
@@ -2730,9 +2650,6 @@ template<typename Self> void TypeGraphWalkerBase<Self>::scanType(Type* type) {
       taskList.push_back(Task::scan(&info->ref.heapType));
       break;
     }
-    case TypeInfo::RttKind:
-      taskList.push_back(Task::scan(&info->rtt.heapType));
-      break;
   }
 }
 
@@ -2868,10 +2785,6 @@ Type TypeBuilder::getTempTupleType(const Tuple& tuple) {
 
 Type TypeBuilder::getTempRefType(HeapType type, Nullability nullable) {
   return markTemp(impl->typeStore.insert(TypeInfo(type, nullable)));
-}
-
-Type TypeBuilder::getTempRttType(Rtt rtt) {
-  return markTemp(impl->typeStore.insert(rtt));
 }
 
 void TypeBuilder::setSubType(size_t i, size_t j) {
@@ -3980,12 +3893,6 @@ size_t hash<wasm::RecGroup>::operator()(const wasm::RecGroup& group) const {
   return wasm::hash(group.getID());
 }
 
-size_t hash<wasm::Rtt>::operator()(const wasm::Rtt& rtt) const {
-  auto digest = wasm::hash(rtt.depth);
-  wasm::rehash(digest, rtt.heapType);
-  return digest;
-}
-
 size_t hash<wasm::TypeInfo>::operator()(const wasm::TypeInfo& info) const {
   auto digest = wasm::hash(info.kind);
   switch (info.kind) {
@@ -3995,9 +3902,6 @@ size_t hash<wasm::TypeInfo>::operator()(const wasm::TypeInfo& info) const {
     case wasm::TypeInfo::RefKind:
       wasm::rehash(digest, info.ref.nullable);
       wasm::rehash(digest, info.ref.heapType);
-      return digest;
-    case wasm::TypeInfo::RttKind:
-      wasm::rehash(digest, info.rtt);
       return digest;
   }
   WASM_UNREACHABLE("unexpected kind");

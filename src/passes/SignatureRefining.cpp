@@ -48,8 +48,12 @@ struct SignatureRefining : public Pass {
   std::unordered_map<HeapType, Signature> newSignatures;
 
   void run(PassRunner* runner, Module* module) override {
-    if (getTypeSystem() != TypeSystem::Nominal) {
-      Fatal() << "SignatureRefining requires nominal typing";
+    if (!module->features.hasGC()) {
+      return;
+    }
+    if (getTypeSystem() != TypeSystem::Nominal &&
+        getTypeSystem() != TypeSystem::Isorecursive) {
+      Fatal() << "SignatureRefining requires nominal/hybrid typing";
     }
 
     if (!module->tables.empty()) {
@@ -81,6 +85,10 @@ struct SignatureRefining : public Pass {
     ModuleUtils::ParallelFunctionAnalysis<Info, Mutable> analysis(
       *module, [&](Function* func, Info& info) {
         if (func->imported()) {
+          // Avoid changing the types of imported functions. Spec and VM support
+          // for that is not yet stable.
+          // TODO: optimize this when possible in the future
+          info.canModify = false;
           return;
         }
         info.calls = std::move(FindAll<Call>(func->body).list);
@@ -111,6 +119,11 @@ struct SignatureRefining : public Pass {
       // Add the function's return LUB to the one for the heap type of that
       // function.
       allInfo[func->type].resultsLUB.combine(info.resultsLUB);
+
+      // If one function cannot be modified, that entire type cannot be.
+      if (!info.canModify) {
+        allInfo[func->type].canModify = false;
+      }
     }
 
     // We cannot alter the signature of an exported function, as the outside may

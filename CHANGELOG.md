@@ -14,6 +14,21 @@ full changeset diff at the end of each section.
 
 Current Trunk
 -------------
+- Change constant values of some reference types in the C and JS APIs. This is
+  only observable if you hardcode specific values instead of calling the
+  relevant methods (like `BinaryenTypeDataref()`). (#4755)
+- `BinaryenModulePrintStackIR`, `BinaryenModuleWriteStackIR` and
+  `BinaryenModuleAllocateAndWriteStackIR` now have an extra boolean
+  argument `optimize`. (#4832)
+- Remove support for the `let` instruction that has been removed from the typed
+  function references spec.
+
+v109
+----
+
+- Add Global Struct Inference pass (#4659) (#4714)
+- Restore and fix SpillPointers pass (#4570)
+- Update relaxed SIMD instructions to latest spec
 
 v108
 ----
@@ -161,6 +176,13 @@ v100
 v99
 ---
 
+- Fix optimization behavior on assuming memory is zero-filled. We made that
+  assumption before, but it is incorrect in general, which caused problems.
+  The fixed behavior is to not assume it, but require the user to pass it in as
+  a flag, `--zero-filled-memory`. Large binaries with lots of empty bytes in the
+  data section may regress without that flag. Toolchains like Emscripten can
+  pass the flag automatically for users if they know it is right to assume,
+  which can avoid any regressions. (#3306)
 - `RefFunc` C and JS API constructors (`BinaryenRefFunc` and `ref.func`
   respectively) now take an extra `type` parameter, similar to `RefNull`. This
   is necessary for typed function references support.

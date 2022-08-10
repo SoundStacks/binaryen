@@ -1,12 +1,19 @@
 #!/usr/bin/python3
 
 '''
-Runs random passes and options on random inputs, using wasm-opt.
+Run various fuzzing operations on random inputs, using wasm-opt. See
+"testcase_handlers" below for the list of fuzzing operations.
 
-Can be configured to run just wasm-opt itself (using --fuzz-exec)
-or also run VMs on it.
+Usage:
 
-For afl-fuzz integration, you probably don't want this, and can use
+./scripts/fuzz_opt.py
+
+That will run forever or until it finds a problem.
+
+Setup: Some tools are optional, like emcc and wasm2c. The v8 shell (d8),
+however, is used in various sub-fuzzers and so it is mandatory.
+
+Note: For afl-fuzz integration, you probably don't want this, and can use
 something like
 
 BINARYEN_CORES=1 BINARYEN_PASS_DEBUG=1 afl-fuzz -i afl-testcases/ -o afl-findings/ -m 100 -d -- bin/wasm-opt -ttf --fuzz-exec --Os @@
@@ -39,7 +46,6 @@ TYPE_SYSTEM_FLAG = '--nominal'
 
 # feature options that are always passed to the tools.
 CONSTANT_FEATURE_OPTS = ['--all-features']
-CONSTANT_FEATURE_OPTS.append(TYPE_SYSTEM_FLAG)
 
 INPUT_SIZE_MIN = 1024
 INPUT_SIZE_MEAN = 40 * 1024
@@ -119,7 +125,10 @@ def randomize_feature_opts():
                 FEATURE_OPTS.append(possible)
                 if possible in IMPLIED_FEATURE_OPTS:
                     FEATURE_OPTS.extend(IMPLIED_FEATURE_OPTS[possible])
-    print('randomized feature opts:', ' '.join(FEATURE_OPTS))
+    print('randomized feature opts:', '\n  ' + '\n  '.join(FEATURE_OPTS))
+    # Type system flags only make sense when GC is enabled
+    if '--disable-gc' not in FEATURE_OPTS:
+        FEATURE_OPTS.append(TYPE_SYSTEM_FLAG)
 
 
 ALL_FEATURE_OPTS = ['--all-features', '-all', '--mvp-features', '-mvp']
@@ -259,7 +268,20 @@ def init_important_initial_contents():
 
 INITIAL_CONTENTS_IGNORE = [
     # not all relaxed SIMD instructions are implemented in the interpreter
-    'relaxed-simd.wast'
+    'relaxed-simd.wast',
+    # TODO fuzzer and interpreter support for strings
+    'strings.wast',
+    # ignore DWARF because it is incompatible with multivalue atm
+    'zlib.wasm',
+    'cubescript.wasm',
+    'class_with_dwarf_noprint.wasm',
+    'fib2_dwarf.wasm',
+    'fib_nonzero-low-pc_dwarf.wasm',
+    'inlined_to_start_dwarf.wasm',
+    'fannkuch3_manyopts_dwarf.wasm',
+    'fib2_emptylocspan_dwarf.wasm',
+    'fannkuch3_dwarf.wasm',
+    'multi_unit_abbrev_noprint.wasm',
 ]
 
 
@@ -325,17 +347,17 @@ def pick_initial_contents():
     FEATURE_OPTS += [
         # has not been fuzzed in general yet
         '--disable-memory64',
-        # avoid multivalue for now due to bad interactions with gc rtts in
-        # stacky code. for example, this fails to roundtrip as the tuple code
-        # ends up creating stacky binary code that needs to spill rtts to locals,
-        # which is not allowed:
+        # avoid multivalue for now due to bad interactions with gc non-nullable
+        # locals in stacky code. for example, this fails to roundtrip as the
+        # tuple code ends up creating stacky binary code that needs to spill
+        # non-nullable references to locals, which is not allowed:
         #
         # (module
         #  (type $other (struct))
-        #  (func $foo (result (rtt $other))
+        #  (func $foo (result (ref $other))
         #   (select
-        #    (rtt.canon $other)
-        #    (rtt.canon $other)
+        #    (struct.new $other)
+        #    (struct.new $other)
         #    (tuple.extract 1
         #     (tuple.make
         #      (i32.const 0)
@@ -346,9 +368,6 @@ def pick_initial_contents():
         #  )
         # )
         '--disable-multivalue',
-        # DWARF is incompatible with multivalue atm; it's more important to
-        # fuzz multivalue since we aren't actually fuzzing DWARF here
-        '--strip-dwarf',
     ]
 
     # the given wasm may not work with the chosen feature opts. for example, if
@@ -767,8 +786,10 @@ class CompareVMs(TestCaseHandler):
                     D8(),
                     D8Liftoff(),
                     D8TurboFan(),
-                    Wasm2C(),
-                    Wasm2C2Wasm()]
+                    # FIXME: Temprorary disable. See issue #4741 for more details
+                    # Wasm2C(),
+                    # Wasm2C2Wasm()
+                    ]
 
     def handle_pair(self, input, before_wasm, after_wasm, opts):
         before = self.run_vms(before_wasm)
@@ -817,8 +838,8 @@ class CheckDeterminism(TestCaseHandler):
         b1 = open('b1.wasm', 'rb').read()
         b2 = open('b2.wasm', 'rb').read()
         if (b1 != b2):
-            run([in_bin('wasm-dis'), 'b1.wasm', '-o', 'b1.wat', TYPE_SYSTEM_FLAG])
-            run([in_bin('wasm-dis'), 'b2.wasm', '-o', 'b2.wat', TYPE_SYSTEM_FLAG])
+            run([in_bin('wasm-dis'), 'b1.wasm', '-o', 'b1.wat'] + FEATURE_OPTS)
+            run([in_bin('wasm-dis'), 'b2.wasm', '-o', 'b2.wat'] + FEATURE_OPTS)
             t1 = open('b1.wat', 'r').read()
             t2 = open('b2.wat', 'r').read()
             compare(t1, t2, 'Output must be deterministic.', verbose=False)
@@ -1048,7 +1069,7 @@ def test_one(random_input, given_wasm):
     pick_initial_contents()
 
     opts = randomize_opt_flags()
-    print('randomized opts:', ' '.join(opts))
+    print('randomized opts:', '\n  ' + '\n  '.join(opts))
     print()
 
     if given_wasm:
@@ -1154,7 +1175,10 @@ opt_choices = [
     ["--inlining-optimizing"],
     ["--flatten", "--simplify-locals-notee-nostructure", "--local-cse"],
     ["--global-refining"],
+    ["--gsi"],
     ["--gto"],
+    ["--gufa"],
+    ["--gufa-optimizing"],
     ["--local-cse"],
     ["--heap2local"],
     ["--remove-unused-names", "--heap2local"],
@@ -1206,9 +1230,10 @@ def randomize_opt_flags():
                 continue
             if '--enable-multivalue' in FEATURE_OPTS and '--enable-reference-types' in FEATURE_OPTS:
                 print('avoiding --flatten due to multivalue + reference types not supporting it (spilling of non-nullable tuples)')
+                print('TODO: Resolving https://github.com/WebAssembly/binaryen/issues/4824 may fix this')
                 continue
             if '--gc' not in FEATURE_OPTS:
-                print('avoiding --flatten due to GC not supporting it (spilling of RTTs)')
+                print('avoiding --flatten due to GC not supporting it (spilling of non-nullable locals)')
                 continue
             if INITIAL_CONTENTS and os.path.getsize(INITIAL_CONTENTS) > 2000:
                 print('avoiding --flatten due using a large amount of initial contents, which may blow up')
@@ -1261,6 +1286,14 @@ print('POSSIBLE_FEATURE_OPTS:', POSSIBLE_FEATURE_OPTS)
 IMPLIED_FEATURE_OPTS = {
     '--disable-reference-types': ['--disable-gc']
 }
+
+print('''
+<<< fuzz_opt.py >>>
+''')
+
+if not shared.V8:
+    print('The v8 shell, d8, must be in the path')
+    sys.exit(1)
 
 if __name__ == '__main__':
     # if we are given a seed, run exactly that one testcase. otherwise,
@@ -1376,10 +1409,8 @@ on valid wasm files.)
                 with open('reduce.sh', 'w') as reduce_sh:
                     reduce_sh.write('''\
 # check the input is even a valid wasm file
-echo "At least one of the next two values should be 0:"
-%(wasm_opt)s %(typesystem)s --detect-features %(temp_wasm)s
-echo "  " $?
-%(wasm_opt)s %(typesystem)s --all-features %(temp_wasm)s
+echo "The following value should be 0:"
+%(wasm_opt)s %(features)s %(temp_wasm)s
 echo "  " $?
 
 # run the command
@@ -1416,7 +1447,7 @@ echo "  " $?
                          'auto_init': auto_init,
                          'original_wasm': original_wasm,
                          'temp_wasm': os.path.abspath('t.wasm'),
-                         'typesystem': TYPE_SYSTEM_FLAG,
+                         'features': ' '.join(FEATURE_OPTS),
                          'reduce_sh': os.path.abspath('reduce.sh')})
 
                 print('''\
@@ -1438,7 +1469,7 @@ You can reduce the testcase by running this now:
 vvvv
 
 
-%(wasm_reduce)s %(type_system_flag)s %(original_wasm)s '--command=bash %(reduce_sh)s' -t %(temp_wasm)s -w %(working_wasm)s
+%(wasm_reduce)s %(features)s %(original_wasm)s '--command=bash %(reduce_sh)s' -t %(temp_wasm)s -w %(working_wasm)s
 
 
 ^^^^
@@ -1446,9 +1477,8 @@ vvvv
 
 Make sure to verify by eye that the output says something like this:
 
-At least one of the next two values should be 0:
+The following value should be 0:
   0
-  1
 The following value should be 1:
   1
 
@@ -1468,7 +1498,7 @@ After reduction, the reduced file will be in %(working_wasm)s
                        'working_wasm': os.path.abspath('w.wasm'),
                        'wasm_reduce': in_bin('wasm-reduce'),
                        'reduce_sh': os.path.abspath('reduce.sh'),
-                       'type_system_flag': TYPE_SYSTEM_FLAG})
+                       'features': ' '.join(FEATURE_OPTS)})
                 break
         if given_seed is not None:
             break
