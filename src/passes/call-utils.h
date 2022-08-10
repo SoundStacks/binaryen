@@ -14,8 +14,8 @@
  * limitations under the License.
  */
 
-#ifndef wasm_ir_function_h
-#define wasm_ir_function_h
+#ifndef wasm_ir_call_utils_h
+#define wasm_ir_call_utils_h
 
 #include <variant>
 
@@ -150,4 +150,4 @@ convertToDirectCalls(T* curr,
 
 } // namespace wasm::CallUtils
 
-#endif // wasm_ir_function_h
+#endif // wasm_ir_call_utils_h
